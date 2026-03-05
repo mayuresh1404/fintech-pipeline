@@ -11,16 +11,52 @@ env:
   ECR_REPOSITORY: trade-api
 
 jobs:
-  build-and-push:
-    name: Build & Push to ECR
+  # ─────────────────────────────────────────
+  # JOB 1: Market Hours Gate
+  # ─────────────────────────────────────────
+  market-hours-check:
+    name: 🕐 Market Hours Gate
     runs-on: ubuntu-latest
+    steps:
+      - name: Check if market is open
+        run: |
+          # Get current IST time
+          IST_HOUR=$(TZ="Asia/Kolkata" date +%H)
+          IST_MIN=$(TZ="Asia/Kolkata" date +%M)
+          IST_DAY=$(TZ="Asia/Kolkata" date +%u)
+          TOTAL_MINS=$((IST_HOUR * 60 + IST_MIN))
+          MARKET_OPEN=$((9 * 60 + 0))
+          MARKET_CLOSE=$((15 * 60 + 45))
+
+          echo "🕐 Current IST time: ${IST_HOUR}:${IST_MIN}"
+          echo "📅 Day of week: ${IST_DAY} (1=Mon, 7=Sun)"
+
+          # Block on weekdays during market hours
+          if [ "$IST_DAY" -le 5 ] && \
+             [ "$TOTAL_MINS" -ge "$MARKET_OPEN" ] && \
+             [ "$TOTAL_MINS" -le "$MARKET_CLOSE" ]; then
+            echo "❌ DEPLOYMENT BLOCKED!"
+            echo "Market is OPEN (${IST_HOUR}:${IST_MIN} IST)"
+            echo "Deployments are not allowed between 9:00 AM - 3:45 PM IST"
+            echo "Please deploy after market hours."
+            exit 1
+          else
+            echo "✅ Market is CLOSED - Deployment allowed!"
+            echo "Current time: ${IST_HOUR}:${IST_MIN} IST"
+          fi
+
+  # ─────────────────────────────────────────
+  # JOB 2: Build & Push (only if gate passes)
+  # ─────────────────────────────────────────
+  build-and-push:
+    name: 🐳 Build & Push to ECR
+    runs-on: ubuntu-latest
+    needs: market-hours-check      # ← Won't run if gate fails!
 
     steps:
-      # Step 1: Checkout code
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Step 2: Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -28,29 +64,23 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Step 3: Login to AWS ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
 
-      # Step 4: Set image tag from git commit SHA
       - name: Set image tag
-        id: vars
         run: echo "IMAGE_TAG=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
 
-      # Step 5: Build Docker image
       - name: Build Docker image
         run: |
           docker build -t ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} .
 
-      # Step 6: Push to ECR
       - name: Push to ECR
         run: |
           docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
-          echo "✅ Pushed image with tag: ${{ env.IMAGE_TAG }}"
+          echo "✅ Pushed image: ${{ env.IMAGE_TAG }}"
 
-      # Step 7: Also tag as latest
-      - name: Tag as latest
+      - name: Tag and push as latest
         run: |
           docker tag \
             ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
